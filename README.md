@@ -1,6 +1,5 @@
 # pkcs11-web-proxy
-
-A very simple reverse proxy that performs all upstream requests with TLS client authentication from a PCKS#11 device.
+A very simple reverse proxy that listens for plain HTTP requests and sends them to an upstream server with TLS client authentication from a PCKS#11 device (like a smart card).
 
 # WARNING
 Please think at least twice before using it. Try to understand what it means: you are exposing a port (on your host only, by default)
@@ -17,6 +16,8 @@ Those are some cases in which it MAY be a good idea to use it:
 In all the other cases, it's probably a bad idea to use it.
 
 # Usage
+First of all, you should probably install OpenSC. It's not a dependency, but it will allow you to get the token serial, and provides a good PKCS#11 module if you don't have one from your device vendor.
+
 Install golang and clone this repo. Build with `go build .` and run with `./pkcs11-web-proxy -help` to see the options:
 ```
   -destination-url string
