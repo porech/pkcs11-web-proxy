@@ -1,6 +1,6 @@
 # pkcs11-web-proxy
 
-A very simple reverse proxy that performs all requests with TLS client authentication from a PCKS#11 device.
+A very simple reverse proxy that performs all upstream requests with TLS client authentication from a PCKS#11 device.
 
 # WARNING
 Please think at least twice before using it. Try to understand what it means: you are exposing a port (on your host only, by default)
