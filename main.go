@@ -99,14 +99,14 @@ func main() {
 		},
 	}
 
-	ipexUrl, err := url.Parse(*destinationUrl)
-	proxy := httputil.NewSingleHostReverseProxy(ipexUrl)
+	destUrl, err := url.Parse(*destinationUrl)
+	proxy := httputil.NewSingleHostReverseProxy(destUrl)
 	proxy.Transport = transport
 
 	handler := func(p *httputil.ReverseProxy) func(http.ResponseWriter, *http.Request) {
 		return func(w http.ResponseWriter, r *http.Request) {
 			if !*noPreserveHost {
-				r.Host = ipexUrl.Host
+				r.Host = destUrl.Host
 			}
 			if *logRequests {
 				timedLog(fmt.Sprintf("Request: %s %s", r.Method, r.URL.String()))
