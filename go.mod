@@ -1,6 +1,6 @@
 module github.com/porech/pkcs11-web-proxy
 
-go 1.21.3
+go 1.21
 
 require github.com/ThalesIgnite/crypto11 v1.2.5
 
