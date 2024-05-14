@@ -10,7 +10,7 @@ The certificate on a smart card may be something that can legally prove your ide
 Needless to say, this poses lots of security risks.
 
 Those are some cases in which it MAY be a good idea to use it:
-- You are developing a client that integrates with an API that requires client authentication, and your preferred tool to play with it doesn't support PKCS#11 devices (looking bad at you, Postman)
+- You are developing a client that integrates with an API that requires client authentication, and your preferred tool to play with it doesn't support PKCS#11 devices (looking bad at you, [Postman](https://github.com/postmanlabs/postman-app-support/issues/3789))
 - You're in your super-secure network with only your devices attached to it, you want to access a service from multiple PCs, but you have only one smart card
 
 In all the other cases, it's probably a bad idea to use it.
