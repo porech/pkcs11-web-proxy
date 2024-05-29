@@ -53,6 +53,9 @@ func main() {
 	destinationUrl := flag.String("destination-url", "", "URL to forward requests to.")
 	noPreserveHost := flag.Bool("no-preserve-host", false, "Do not preserve the host header in the request.")
 	logRequests := flag.Bool("log-requests", false, "Log each request to stdout.")
+	listenTLS := flag.Bool("listen-tls", false, "Listen on TLS instead of plain HTTP (useful if your upstream sets 'secure' cookies")
+	listenTLSCertificate := flag.String("listen-tls-cert", "", "Path to the certificate or chain file for the TLS listener (required if --listen-tls is set)")
+	listenTLSPrivateKey := flag.String("listen-tls-key", "", "Path to the private key file for the TLS listener (required if --listen-tls is set)")
 	flag.Parse()
 
 	if *pkcs11path == "" {
@@ -104,6 +107,14 @@ func main() {
 		return
 	}
 
+	if *listenTLS {
+		if *listenTLSPrivateKey == "" || *listenTLSCertificate == "" {
+			fmt.Println("listen-tls-private-key and listen-tls-certificate are required when listen-tls is set")
+			flag.Usage()
+			return
+		}
+	}
+
 	timedLog("Reverse proxy is starting")
 	config := crypto11.Config{
 		Path:        *pkcs11path,
@@ -150,6 +161,11 @@ func main() {
 	}
 
 	http.HandleFunc("/", handler(proxy))
-	timedLog(fmt.Sprintf("Listening on %s:%d", *listenAddress, *listenPort))
-	panic(http.ListenAndServe(fmt.Sprintf("%s:%d", *listenAddress, *listenPort), nil))
+	if *listenTLS {
+		timedLog(fmt.Sprintf("Listening on %s:%d over TLS", *listenAddress, *listenPort))
+		log.Fatal(http.ListenAndServeTLS(fmt.Sprintf("%s:%d", *listenAddress, *listenPort), *listenTLSCertificate, *listenTLSPrivateKey, nil))
+	} else {
+		timedLog(fmt.Sprintf("Listening on %s:%d", *listenAddress, *listenPort))
+		log.Fatal(http.ListenAndServe(fmt.Sprintf("%s:%d", *listenAddress, *listenPort), nil))
+	}
 }

@@ -54,6 +54,15 @@ Install golang and clone this repo. Build with `go build .` and run with `./pkcs
 
   -certificate-index int
     	Index of the certificate to use. Run './pkcs11-web-proxy -token-serial ... [-pin/-pin-file] ... list-certificates' to find the index. By default, the first found certificate (index 0) will be used.
+
+  -listen-tls
+        Listen on TLS instead of plain HTTP (useful if your upstream sets 'secure' cookies)
+
+  -listen-tls-cert
+        Path to the certificate or chain file for the TLS listener (required if --listen-tls is set)
+
+  -listen-tls-key
+        Path to the private key file for the TLS listener (required if --listen-tls is set)
 ```
 
 If you have multiple certificates on the same card, you can choose the one to use with its index. To list all of the available certificates you can run:
@@ -87,3 +96,24 @@ if [ -f /tmp/pin-val.txt ]; then
 rm /tmp/pin-val.txt
 fi
 ```
+
+# TLS listener
+
+It seems counterintuitive to run such a tool to listen over TLS, but sometimes an upstream server may set cookies with the "secure" flag, which will be ignored by the browser if the connection is not over HTTPS.
+This may lead to issues with authentication on such services.
+
+By using the TLS listener, you may avoid this issue: the connection to the reverse proxy will be over HTTPS, but it won't require a client certificate, that will be injected by the proxy itself when connecting to the upstream server.
+
+You can generate a self-signed certificate and key with openssl:
+
+```
+openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 3650 -nodes
+```
+
+And then run the proxy with:
+
+```
+./pkcs11-web-proxy -destination-url https://clientecho.alerinaldi.it -pin 12345 -pkcs11-path /lib/bit4id/libbit4xpki.so -token-serial 1234567898765432 -listen-tls -listen-tls-cert cert.pem -listen-tls-key key.pem
+```
+
+You'll need to trust your certificate on your browser or application to avoid security warnings.
