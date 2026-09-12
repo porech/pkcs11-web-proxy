@@ -22,7 +22,11 @@ In all the other cases, it's probably a bad idea to use it.
 
 First of all, you should probably install OpenSC. It's not a dependency, but it brings the `pkcs11-tool` utility to get the token serial, and also a good PKCS#11 module if you don't have one from your device vendor.
 
-Install golang and clone this repo. Build with `go build .` and run with `./pkcs11-web-proxy -help` to see the options:
+Install golang and clone this repo. Build with `go build .` and run with `./pkcs11-web-proxy -help` to see the options.
+
+The first argument chooses what to run: `proxy` to forward requests, `sign` to expose the signing API described below, or `list-certificates` to print the certificates on the card. If you leave it out you get `proxy`, so existing command lines keep working.
+
+These are the options:
 
 ```
   -listen-addr string
@@ -53,7 +57,7 @@ Install golang and clone this repo. Build with `go build .` and run with `./pkcs
     	File containing the PIN to access the card (will be deleted after read!). Cannot be used with --pin.
 
   -certificate-index int
-    	Index of the certificate to use. Run './pkcs11-web-proxy -token-serial ... [-pin/-pin-file] ... list-certificates' to find the index. By default, the first found certificate (index 0) will be used.
+    	Index of the certificate to use. Run 'list-certificates' to find the index. By default, the first found certificate (index 0) will be used.
 
   -listen-tls
         Listen on TLS instead of plain HTTP (useful if your upstream sets 'secure' cookies)
@@ -76,6 +80,91 @@ If you have multiple certificates on the same card, you can choose the one to us
 ```
 ./pkcs11-web-proxy -destination-url https://clientecho.alerinaldi.it -pin 12345 -pkcs11-path /lib/bit4id/libbit4xpki.so -token-serial 1234567898765432
 ```
+
+# Signing mode
+
+The tool does one of two jobs, and you choose which one when you start it. In
+`proxy` mode — the default, and what every example above shows — it forwards
+requests to an upstream server with TLS client authentication. In `sign` mode it
+forwards nothing, and instead exposes a small HTTP API that signs a digest with a
+key on the card.
+
+Either mode is useful on its own, and most likely you want just one of them. If
+you happen to want both at the same time, run two instances on different ports.
+
+Be aware of what sharing a token means, though. The card holds one authentication
+state for every process using it, and a signature is not a single card operation:
+the key is selected, the PIN is presented, and only then is the signature
+computed. Two instances are not isolated from each other, and one can disturb the
+other between those steps. PC/SC serialises access and in practice this works,
+but it is not a guarantee, and an operation can fail because of it.
+
+```
+./pkcs11-web-proxy sign -listen-port 8081 -pin-file /tmp/pin-val.txt -pkcs11-path /lib/bit4id/libbit4xpki.so -token-serial 1234567898765432
+```
+
+## WARNING, again
+
+Read the warning at the top of this file, then read it again with this in mind:
+in `sign` mode you are exposing a port that will sign **anything** handed to it,
+with a certificate that may legally prove your identity. The proxy at least
+limits what can be done to whatever your upstream server allows. This does not.
+A signing certificate on an Italian smart card produces a signature with legal
+value equivalent to a handwritten one.
+
+Do not expose this beyond `127.0.0.1` unless you are certain about what can reach
+it.
+
+## Choosing the certificate
+
+`-certificate-index` selects the certificate, exactly as in proxy mode, and
+`list-certificates` shows the available ones. Certificates are not filtered by
+key usage: if you want to sign with the authentication certificate rather than
+the signing one, you can.
+
+The certificate must use an RSA key, which is checked at startup.
+
+## The API
+
+`GET /api/v1/signing/identity` describes the active certificate, so a caller can
+build whatever structure it needs around the signature:
+
+```
+curl http://127.0.0.1:8081/api/v1/signing/identity
+```
+
+```json
+{
+  "version": 1,
+  "certificate_der_base64": "MIIF...",
+  "certificate_sha256": "3b7a...",
+  "digest_algorithm": "SHA-256",
+  "signature_algorithm": "RSASSA-PKCS1-v1_5",
+  "signature_length": 256
+}
+```
+
+`POST /api/v1/signing/sign-digest` signs a digest. The body must be exactly 32
+raw bytes — the SHA-256 digest of whatever you are signing, not the data itself
+— and the response is the raw signature:
+
+```
+printf 'the data to sign' | openssl dgst -sha256 -binary > digest.bin
+curl -X POST --data-binary @digest.bin \
+  -H 'X-PKCS11-Sign-Request: 1' \
+  http://127.0.0.1:8081/api/v1/signing/sign-digest > signature.bin
+```
+
+The digest is signed as supplied and is never hashed again, so the signature
+verifies against the digest you sent.
+
+The `X-PKCS11-Sign-Request: 1` header is required and requests without it are
+refused. It is not authentication — anything that can reach the port can set it
+— but a cross-origin form post from a web page you happen to be visiting cannot,
+and that is the accident it exists to prevent.
+
+Signing with a qualified signature key presents the PIN to the card on every
+single signature, which is why the process holds the PIN for as long as it runs.
 
 # You should not use -pin
 
