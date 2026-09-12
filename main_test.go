@@ -3,6 +3,8 @@ package main
 import (
 	"crypto/tls"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -82,5 +84,58 @@ func TestSelectCertificateRefusesAnIndexOutsideTheList(t *testing.T) {
 	}
 	if _, err := selectCertificate(certificates, 1); err != nil {
 		t.Fatalf("index 1 was refused for a list of 2: %v", err)
+	}
+}
+
+func TestValidateOptionsRequiresWhatEachModeNeeds(t *testing.T) {
+	complete := options{PKCS11Path: "/lib/module.so", TokenSerial: "123", PIN: "1234", DestinationURL: "https://example.test"}
+
+	tests := []struct {
+		name    string
+		mode    string
+		mutate  func(*options)
+		wantErr bool
+	}{
+		{name: "proxy is complete", mode: "proxy"},
+		{name: "proxy without destination", mode: "proxy", mutate: func(o *options) { o.DestinationURL = "" }, wantErr: true},
+		{name: "sign needs no destination", mode: "sign", mutate: func(o *options) { o.DestinationURL = "" }},
+		{name: "no module path", mode: "sign", mutate: func(o *options) { o.PKCS11Path = "" }, wantErr: true},
+		{name: "no token serial", mode: "sign", mutate: func(o *options) { o.TokenSerial = "" }, wantErr: true},
+		{name: "no pin at all", mode: "sign", mutate: func(o *options) { o.PIN = "" }, wantErr: true},
+		{name: "pin file instead of pin", mode: "sign", mutate: func(o *options) { o.PIN = ""; o.PINFile = "/tmp/pin" }},
+		{name: "listen-tls without a certificate", mode: "sign", mutate: func(o *options) { o.ListenTLS = true }, wantErr: true},
+		{name: "list-certificates needs no destination", mode: "list-certificates", mutate: func(o *options) { o.DestinationURL = "" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			opts := complete
+			if test.mutate != nil {
+				test.mutate(&opts)
+			}
+			err := validateOptions(test.mode, opts)
+			if test.wantErr && err == nil {
+				t.Fatal("the options were accepted")
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("the options were refused: %v", err)
+			}
+		})
+	}
+}
+
+func TestReadPINFileDeletesTheFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pin")
+	if err := os.WriteFile(path, []byte("  1234\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pin, err := readPINFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pin != "1234" {
+		t.Fatalf("pin = %q, want \"1234\"", pin)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("the PIN file still exists after being read")
 	}
 }
