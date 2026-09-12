@@ -6,7 +6,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"io"
 	"strings"
+	"sync"
 
 	"github.com/miekg/pkcs11"
 )
@@ -234,4 +236,162 @@ func findSigningKey(module tokenModule, session pkcs11.SessionHandle, identifier
 		return handles[0], false, nil
 	}
 	return handles[0], len(attributes[0].Value) == 1 && attributes[0].Value[0] == 1, nil
+}
+
+// *pkcs11.Ctx must remain usable as the module: this fails to compile the
+// moment the interface and the library drift apart.
+var _ tokenModule = (*pkcs11.Ctx)(nil)
+
+// card owns the PKCS#11 module, the session, and the PIN for the life of the
+// process. It opens once at startup: if the card goes away, operations fail
+// with the error the module gives, and nothing tries to recover.
+type card struct {
+	module  tokenModule
+	session pkcs11.SessionHandle
+	pin     string
+	mutex   sync.Mutex
+}
+
+// openCard loads the module, finds the token, and logs in.
+func openCard(modulePath, tokenSerial, pin string) (*card, error) {
+	module := pkcs11.New(modulePath)
+	if module == nil {
+		return nil, fmt.Errorf("cannot load the PKCS#11 module %q", modulePath)
+	}
+	if err := module.Initialize(); err != nil {
+		module.Destroy()
+		return nil, fmt.Errorf("initialize the PKCS#11 module %q: %w", modulePath, err)
+	}
+
+	slot, err := findSlotBySerial(module, tokenSerial)
+	if err != nil {
+		_ = module.Finalize()
+		module.Destroy()
+		return nil, err
+	}
+	session, err := module.OpenSession(slot, pkcs11.CKF_SERIAL_SESSION)
+	if err != nil {
+		_ = module.Finalize()
+		module.Destroy()
+		return nil, fmt.Errorf("open a session on token %q: %w", tokenSerial, err)
+	}
+	if err := module.Login(session, pkcs11.CKU_USER, pin); err != nil {
+		_ = module.CloseSession(session)
+		_ = module.Finalize()
+		module.Destroy()
+		return nil, fmt.Errorf("log in to token %q: %w", tokenSerial, err)
+	}
+	return &card{module: module, session: session, pin: pin}, nil
+}
+
+func (c *card) Close() {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if c.module == nil {
+		return
+	}
+	_ = c.module.Logout(c.session)
+	_ = c.module.CloseSession(c.session)
+	c.module.Destroy()
+	c.module = nil
+}
+
+func (c *card) PairedCertificates() ([]tls.Certificate, error) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	return pairedCertificates(c.module, c.session)
+}
+
+// cardSigner presents the key of one certificate as a crypto.Signer. It holds
+// nothing of the card: it asks the card.
+type cardSigner struct {
+	card               *card
+	key                pkcs11.ObjectHandle
+	alwaysAuthenticate bool
+	public             crypto.PublicKey
+}
+
+func (s *cardSigner) Public() crypto.PublicKey { return s.public }
+
+func (s *cardSigner) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+	prefix, err := digestInfoPrefix(opts)
+	if err != nil {
+		return nil, err
+	}
+	if len(digest) != opts.HashFunc().Size() {
+		return nil, fmt.Errorf(
+			"the digest is %d bytes but %v produces %d",
+			len(digest), opts.HashFunc(), opts.HashFunc().Size(),
+		)
+	}
+	return s.card.sign(s, append(append([]byte{}, prefix...), digest...))
+}
+
+// sign performs one signature. The order below is prescribed by PKCS#11 and
+// inverting it fails on cards that enforce it, which is why the login sits
+// between the init and the signature rather than before both.
+//
+// The mutex is not decoration: two signatures interleaving on one session would
+// step on each other's security state.
+func (c *card) sign(signer *cardSigner, message []byte) ([]byte, error) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	mechanism := []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_RSA_PKCS, nil)}
+	if err := c.module.SignInit(c.session, mechanism, signer.key); err != nil {
+		return nil, fmt.Errorf("PKCS#11 sign init: %w", err)
+	}
+	if signer.alwaysAuthenticate {
+		if err := c.module.Login(c.session, pkcs11.CKU_CONTEXT_SPECIFIC, c.pin); err != nil {
+			return nil, fmt.Errorf("PKCS#11 context-specific login: %w", err)
+		}
+	}
+	signature, err := c.module.Sign(c.session, message)
+	if err != nil {
+		return nil, fmt.Errorf("PKCS#11 sign: %w", err)
+	}
+	return signature, nil
+}
+
+// Signer binds a certificate from this card to its key.
+func (c *card) Signer(certificate tls.Certificate) (*cardSigner, error) {
+	if certificate.Leaf == nil || len(certificate.Certificate) == 0 {
+		return nil, fmt.Errorf("the certificate carries no usable bytes")
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	identifier, err := certificateIdentifier(c.module, c.session, certificate.Certificate[0])
+	if err != nil {
+		return nil, err
+	}
+	key, alwaysAuthenticate, err := findSigningKey(c.module, c.session, identifier)
+	if err != nil {
+		return nil, err
+	}
+	return &cardSigner{
+		card:               c,
+		key:                key,
+		alwaysAuthenticate: alwaysAuthenticate,
+		public:             certificate.Leaf.PublicKey,
+	}, nil
+}
+
+// tlsCertificate ties a card certificate to its key and declares which
+// signature schemes we can perform.
+//
+// Declaring them matters: without it Go may pick RSA-PSS and discover
+// mid-handshake that we cannot do it.
+func (c *card) tlsCertificate(certificate tls.Certificate) (tls.Certificate, error) {
+	signer, err := c.Signer(certificate)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	certificate.PrivateKey = signer
+	certificate.SupportedSignatureAlgorithms = []tls.SignatureScheme{
+		tls.PKCS1WithSHA256,
+		tls.PKCS1WithSHA384,
+		tls.PKCS1WithSHA512,
+	}
+	return certificate, nil
 }
