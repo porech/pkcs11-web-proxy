@@ -4,6 +4,9 @@ import (
 	"crypto"
 	"crypto/rsa"
 	"fmt"
+	"strings"
+
+	"github.com/miekg/pkcs11"
 )
 
 // DigestInfo prefixes (RFC 8017). Signing happens with CKM_RSA_PKCS over the
@@ -52,5 +55,69 @@ func digestInfoPrefix(opts crypto.SignerOpts) ([]byte, error) {
 		return sha512DigestInfoPrefix, nil
 	default:
 		return nil, fmt.Errorf("unsupported hash function for PKCS#1 v1.5: %v", opts.HashFunc())
+	}
+}
+
+// tokenModule is the slice of a PKCS#11 module this program uses. *pkcs11.Ctx
+// satisfies it as it is; declaring it is what lets the card layer be tested
+// without a card.
+type tokenModule interface {
+	GetSlotList(tokenPresent bool) ([]uint, error)
+	GetTokenInfo(slotID uint) (pkcs11.TokenInfo, error)
+	OpenSession(slotID uint, flags uint) (pkcs11.SessionHandle, error)
+	CloseSession(sh pkcs11.SessionHandle) error
+	Login(sh pkcs11.SessionHandle, userType uint, pin string) error
+	Logout(sh pkcs11.SessionHandle) error
+	SignInit(sh pkcs11.SessionHandle, m []*pkcs11.Mechanism, o pkcs11.ObjectHandle) error
+	Sign(sh pkcs11.SessionHandle, message []byte) ([]byte, error)
+	FindObjectsInit(sh pkcs11.SessionHandle, temp []*pkcs11.Attribute) error
+	FindObjects(sh pkcs11.SessionHandle, max int) ([]pkcs11.ObjectHandle, bool, error)
+	FindObjectsFinal(sh pkcs11.SessionHandle) error
+	GetAttributeValue(sh pkcs11.SessionHandle, o pkcs11.ObjectHandle, a []*pkcs11.Attribute) ([]*pkcs11.Attribute, error)
+	Destroy()
+}
+
+// findSlotBySerial locates the token by serial number. A slot that will not
+// answer is not an empty slot: the search carries on, because the card may be
+// in another reader, but the failure is reported if no slot holds the token.
+func findSlotBySerial(module tokenModule, serial string) (uint, error) {
+	slots, err := module.GetSlotList(true)
+	if err != nil {
+		return 0, fmt.Errorf("list PKCS#11 slots: %w", err)
+	}
+	var unreadable error
+	for _, slot := range slots {
+		info, err := module.GetTokenInfo(slot)
+		if err != nil {
+			unreadable = err
+			continue
+		}
+		if strings.TrimSpace(info.SerialNumber) == serial {
+			return slot, nil
+		}
+	}
+	if unreadable != nil {
+		return 0, fmt.Errorf("no token with serial %q, and a slot could not be read: %w", serial, unreadable)
+	}
+	return 0, fmt.Errorf("no token with serial %q is present", serial)
+}
+
+// findObjects runs a PKCS#11 object search to exhaustion.
+func findObjects(module tokenModule, session pkcs11.SessionHandle, template []*pkcs11.Attribute) ([]pkcs11.ObjectHandle, error) {
+	if err := module.FindObjectsInit(session, template); err != nil {
+		return nil, fmt.Errorf("PKCS#11 find init: %w", err)
+	}
+	defer func() { _ = module.FindObjectsFinal(session) }()
+
+	var all []pkcs11.ObjectHandle
+	for {
+		handles, _, err := module.FindObjects(session, 64)
+		if err != nil {
+			return nil, fmt.Errorf("PKCS#11 find: %w", err)
+		}
+		if len(handles) == 0 {
+			return all, nil
+		}
+		all = append(all, handles...)
 	}
 }
