@@ -3,6 +3,8 @@ package main
 import (
 	"crypto"
 	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"strings"
 
@@ -120,4 +122,64 @@ func findObjects(module tokenModule, session pkcs11.SessionHandle, template []*p
 		}
 		all = append(all, handles...)
 	}
+}
+
+// pairedCertificates lists the certificates on the card that have a usable
+// private key, in the order that fixes their index.
+//
+// The order is a contract. It walks private keys in the order the module
+// returns them and reaches the certificate from the key, never the reverse,
+// because that is the order -certificate-index has always meant. Two skip
+// rules apply, and both must stay: a key with no CKA_ID cannot be paired, and
+// a key whose CKA_ID matches no certificate has nothing to present.
+//
+// An attribute that cannot be read is treated as absent rather than fatal:
+// tokens differ in what they expose, and one unreadable object should not make
+// the whole card unusable.
+func pairedCertificates(module tokenModule, session pkcs11.SessionHandle) ([]tls.Certificate, error) {
+	keys, err := findObjects(module, session, []*pkcs11.Attribute{
+		pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_PRIVATE_KEY),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var certificates []tls.Certificate
+	for _, key := range keys {
+		attributes, err := module.GetAttributeValue(session, key, []*pkcs11.Attribute{
+			pkcs11.NewAttribute(pkcs11.CKA_ID, nil),
+		})
+		if err != nil || len(attributes[0].Value) == 0 {
+			continue
+		}
+		identifier := attributes[0].Value
+
+		handles, err := findObjects(module, session, []*pkcs11.Attribute{
+			pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_CERTIFICATE),
+			pkcs11.NewAttribute(pkcs11.CKA_ID, identifier),
+		})
+		if err != nil {
+			return nil, err
+		}
+		if len(handles) == 0 {
+			continue
+		}
+
+		values, err := module.GetAttributeValue(session, handles[0], []*pkcs11.Attribute{
+			pkcs11.NewAttribute(pkcs11.CKA_VALUE, nil),
+		})
+		if err != nil {
+			continue
+		}
+		der := values[0].Value
+		leaf, err := x509.ParseCertificate(der)
+		if err != nil {
+			continue
+		}
+		certificates = append(certificates, tls.Certificate{
+			Leaf:        leaf,
+			Certificate: [][]byte{der},
+		})
+	}
+	return certificates, nil
 }

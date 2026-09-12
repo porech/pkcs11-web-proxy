@@ -3,9 +3,14 @@ package main
 import (
 	"bytes"
 	"crypto"
+	"crypto/rand"
 	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"fmt"
+	"math/big"
 	"testing"
+	"time"
 
 	"github.com/miekg/pkcs11"
 )
@@ -58,6 +63,9 @@ type fakeModule struct {
 	objects    map[pkcs11.ObjectHandle]map[string][]byte
 	findResult [][]pkcs11.ObjectHandle
 	findIndex  int
+
+	pending          []pkcs11.ObjectHandle
+	pendingDelivered bool
 }
 
 func (m *fakeModule) GetSlotList(bool) ([]uint, error) { return m.slots, nil }
@@ -94,16 +102,27 @@ func (m *fakeModule) Sign(_ pkcs11.SessionHandle, message []byte) ([]byte, error
 	return []byte("signature"), nil
 }
 
-func (m *fakeModule) FindObjectsInit(pkcs11.SessionHandle, []*pkcs11.Attribute) error { return nil }
-func (m *fakeModule) FindObjectsFinal(pkcs11.SessionHandle) error                     { return nil }
+// FindObjectsInit starts a search: it takes the next entry of findResult, which
+// FindObjects then delivers once. The search boundary matters, because a real
+// caller keeps calling FindObjects until it comes back empty.
+func (m *fakeModule) FindObjectsInit(pkcs11.SessionHandle, []*pkcs11.Attribute) error {
+	m.pending = nil
+	if m.findIndex < len(m.findResult) {
+		m.pending = m.findResult[m.findIndex]
+		m.findIndex++
+	}
+	m.pendingDelivered = false
+	return nil
+}
+
+func (m *fakeModule) FindObjectsFinal(pkcs11.SessionHandle) error { return nil }
 
 func (m *fakeModule) FindObjects(pkcs11.SessionHandle, int) ([]pkcs11.ObjectHandle, bool, error) {
-	if m.findIndex >= len(m.findResult) {
+	if m.pendingDelivered {
 		return nil, false, nil
 	}
-	result := m.findResult[m.findIndex]
-	m.findIndex++
-	return result, false, nil
+	m.pendingDelivered = true
+	return m.pending, false, nil
 }
 
 func (m *fakeModule) GetAttributeValue(_ pkcs11.SessionHandle, object pkcs11.ObjectHandle, template []*pkcs11.Attribute) ([]*pkcs11.Attribute, error) {
@@ -157,5 +176,68 @@ func TestFindSlotBySerialReportsAnAbsentToken(t *testing.T) {
 	module := &fakeModule{slots: []uint{0}, tokens: map[uint]pkcs11.TokenInfo{0: {SerialNumber: "other"}}}
 	if _, err := findSlotBySerial(module, "7430010024925855"); err == nil {
 		t.Fatal("an absent token was accepted")
+	}
+}
+
+// newTestCertificateDER makes a self-signed RSA certificate, returning its DER
+// and the key that signed it.
+func newTestCertificateDER(t *testing.T, commonName string) ([]byte, *rsa.PrivateKey) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: commonName},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return der, key
+}
+
+func TestPairedCertificatesFollowsPrivateKeyOrderAndSkipsWhatCannotBePaired(t *testing.T) {
+	firstDER, _ := newTestCertificateDER(t, "first")
+	secondDER, _ := newTestCertificateDER(t, "second")
+
+	// Handles 10, 11, 12, 13 are private keys, returned in that order.
+	// 11 has no CKA_ID and 12 has no certificate: both are skipped, so the
+	// result is [first, second] and their indices are 0 and 1.
+	module := &fakeModule{
+		findResult: [][]pkcs11.ObjectHandle{
+			{10, 11, 12, 13}, // the private key search
+			{20},             // certificate for key 10
+			{},               // no certificate for key 12
+			{21},             // certificate for key 13
+		},
+		objects: map[pkcs11.ObjectHandle]map[string][]byte{
+			10: {"id": []byte("A")},
+			11: {"id": []byte{}},
+			12: {"id": []byte("C")},
+			13: {"id": []byte("D")},
+			20: {"value": firstDER},
+			21: {"value": secondDER},
+		},
+	}
+
+	certificates, err := pairedCertificates(module, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(certificates) != 2 {
+		t.Fatalf("got %d certificates, want 2", len(certificates))
+	}
+	if certificates[0].Leaf.Subject.CommonName != "first" {
+		t.Fatalf("index 0 is %q, want \"first\"", certificates[0].Leaf.Subject.CommonName)
+	}
+	if certificates[1].Leaf.Subject.CommonName != "second" {
+		t.Fatalf("index 1 is %q, want \"second\"", certificates[1].Leaf.Subject.CommonName)
+	}
+	if !bytes.Equal(certificates[0].Certificate[0], firstDER) {
+		t.Fatal("the DER bytes of index 0 are not the certificate found on the card")
 	}
 }
