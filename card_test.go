@@ -5,10 +5,13 @@ import (
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"fmt"
 	"math/big"
+	"reflect"
 	"testing"
 	"time"
 
@@ -291,5 +294,86 @@ func TestCertificateIdentifierFindsTheCardObjectForSomeDER(t *testing.T) {
 	}
 	if !bytes.Equal(identifier, []byte("DS")) {
 		t.Fatalf("identifier = %q, want \"DS\"", identifier)
+	}
+}
+
+// newTestCard wires a card onto a fake module, skipping openCard, which needs a
+// real library on disk.
+func newTestCard(module tokenModule) *card {
+	return &card{module: module, session: 1, pin: "1234"}
+}
+
+func TestSignPresentsThePINBetweenSignInitAndSignForAQualifiedKey(t *testing.T) {
+	module := &fakeModule{}
+	signer := &cardSigner{card: newTestCard(module), key: 30, alwaysAuthenticate: true}
+	digest := sha256.Sum256([]byte("signed attributes"))
+
+	if _, err := signer.Sign(rand.Reader, digest[:], crypto.SHA256); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"SignInit", "Login", "Sign"}
+	if !reflect.DeepEqual(module.calls, want) {
+		t.Fatalf("calls = %v, want %v", module.calls, want)
+	}
+	if len(module.logins) != 1 || module.logins[0] != pkcs11.CKU_CONTEXT_SPECIFIC {
+		t.Fatalf("logins = %v, want one CKU_CONTEXT_SPECIFIC", module.logins)
+	}
+	wantMessage := append(append([]byte{}, sha256DigestInfoPrefix...), digest[:]...)
+	if !bytes.Equal(module.signed, wantMessage) {
+		t.Fatalf("card received %x, want the SHA-256 DigestInfo %x", module.signed, wantMessage)
+	}
+}
+
+func TestSignSkipsTheExtraLoginWhenTheKeyDoesNotDemandIt(t *testing.T) {
+	module := &fakeModule{}
+	signer := &cardSigner{card: newTestCard(module), key: 30, alwaysAuthenticate: false}
+	digest := sha256.Sum256([]byte("signed attributes"))
+
+	if _, err := signer.Sign(rand.Reader, digest[:], crypto.SHA256); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"SignInit", "Sign"}
+	if !reflect.DeepEqual(module.calls, want) {
+		t.Fatalf("calls = %v, want %v", module.calls, want)
+	}
+}
+
+func TestSignRefusesADigestThatIsNotTheDeclaredLength(t *testing.T) {
+	signer := &cardSigner{card: newTestCard(&fakeModule{}), key: 30}
+	if _, err := signer.Sign(rand.Reader, make([]byte, 31), crypto.SHA256); err == nil {
+		t.Fatal("a 31-byte SHA-256 digest was accepted")
+	}
+}
+
+func TestTLSCertificateDeclaresTheSchemesTheCardCanSign(t *testing.T) {
+	der, key := newTestCertificateDER(t, "tls")
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := &fakeModule{
+		findResult: [][]pkcs11.ObjectHandle{{40}, {30}},
+		objects: map[pkcs11.ObjectHandle]map[string][]byte{
+			40: {"id": []byte("A")},
+			30: {"always": {1}},
+		},
+	}
+
+	certificate, err := newTestCard(module).tlsCertificate(tls.Certificate{Leaf: leaf, Certificate: [][]byte{der}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, isSigner := certificate.PrivateKey.(crypto.Signer)
+	if !isSigner {
+		t.Fatal("the TLS certificate did not get a signer")
+	}
+	want := []tls.SignatureScheme{tls.PKCS1WithSHA256, tls.PKCS1WithSHA384, tls.PKCS1WithSHA512}
+	if !reflect.DeepEqual(certificate.SupportedSignatureAlgorithms, want) {
+		t.Fatalf("schemes = %v, want %v", certificate.SupportedSignatureAlgorithms, want)
+	}
+	if signer.Public().(*rsa.PublicKey).N.Cmp(key.PublicKey.N) != 0 {
+		t.Fatal("the signer does not carry the certificate's public key")
 	}
 }
