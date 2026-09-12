@@ -183,3 +183,55 @@ func pairedCertificates(module tokenModule, session pkcs11.SessionHandle) ([]tls
 	}
 	return certificates, nil
 }
+
+// certificateIdentifier finds the CKA_ID of the card object holding these
+// certificate bytes. The identifier is what ties a certificate to its key.
+func certificateIdentifier(module tokenModule, session pkcs11.SessionHandle, der []byte) ([]byte, error) {
+	handles, err := findObjects(module, session, []*pkcs11.Attribute{
+		pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_CERTIFICATE),
+		pkcs11.NewAttribute(pkcs11.CKA_VALUE, der),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(handles) == 0 {
+		return nil, fmt.Errorf("the certificate is not on the card")
+	}
+	attributes, err := module.GetAttributeValue(session, handles[0], []*pkcs11.Attribute{
+		pkcs11.NewAttribute(pkcs11.CKA_ID, nil),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read the certificate identifier: %w", err)
+	}
+	return attributes[0].Value, nil
+}
+
+// findSigningKey returns the private key for an identifier, and whether that
+// key demands the PIN again for every signature.
+//
+// CKA_ALWAYS_AUTHENTICATE is what distinguishes a non-repudiation key from an
+// authentication key: PKCS#11 requires a C_Login(CKU_CONTEXT_SPECIFIC) between
+// C_SignInit and C_Sign for such a key, and Italian smart cards impose it on
+// the qualified signing key.
+//
+// A token that does not expose the attribute is taken not to need it, which is
+// the common case and not an error.
+func findSigningKey(module tokenModule, session pkcs11.SessionHandle, identifier []byte) (pkcs11.ObjectHandle, bool, error) {
+	handles, err := findObjects(module, session, []*pkcs11.Attribute{
+		pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_PRIVATE_KEY),
+		pkcs11.NewAttribute(pkcs11.CKA_ID, identifier),
+	})
+	if err != nil {
+		return 0, false, err
+	}
+	if len(handles) == 0 {
+		return 0, false, fmt.Errorf("no private key matches the certificate")
+	}
+	attributes, err := module.GetAttributeValue(session, handles[0], []*pkcs11.Attribute{
+		pkcs11.NewAttribute(pkcs11.CKA_ALWAYS_AUTHENTICATE, nil),
+	})
+	if err != nil {
+		return handles[0], false, nil
+	}
+	return handles[0], len(attributes[0].Value) == 1 && attributes[0].Value[0] == 1, nil
+}

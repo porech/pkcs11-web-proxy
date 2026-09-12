@@ -241,3 +241,55 @@ func TestPairedCertificatesFollowsPrivateKeyOrderAndSkipsWhatCannotBePaired(t *t
 		t.Fatal("the DER bytes of index 0 are not the certificate found on the card")
 	}
 }
+
+func TestFindSigningKeyReportsWhetherEachSignatureNeedsThePINAgain(t *testing.T) {
+	tests := []struct {
+		name       string
+		attributes map[string][]byte
+		want       bool
+	}{
+		{name: "qualified signing key", attributes: map[string][]byte{"always": {1}}, want: true},
+		{name: "authentication key", attributes: map[string][]byte{"always": {0}}, want: false},
+		{name: "token does not expose the attribute", attributes: map[string][]byte{}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			module := &fakeModule{
+				findResult: [][]pkcs11.ObjectHandle{{30}},
+				objects:    map[pkcs11.ObjectHandle]map[string][]byte{30: test.attributes},
+			}
+			key, alwaysAuthenticate, err := findSigningKey(module, 1, []byte("A"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if key != 30 {
+				t.Fatalf("key = %d, want 30", key)
+			}
+			if alwaysAuthenticate != test.want {
+				t.Fatalf("alwaysAuthenticate = %v, want %v", alwaysAuthenticate, test.want)
+			}
+		})
+	}
+}
+
+func TestFindSigningKeyReportsACertificateWithNoKey(t *testing.T) {
+	module := &fakeModule{findResult: [][]pkcs11.ObjectHandle{{}}}
+	if _, _, err := findSigningKey(module, 1, []byte("A")); err == nil {
+		t.Fatal("a certificate with no private key was accepted")
+	}
+}
+
+func TestCertificateIdentifierFindsTheCardObjectForSomeDER(t *testing.T) {
+	der, _ := newTestCertificateDER(t, "identified")
+	module := &fakeModule{
+		findResult: [][]pkcs11.ObjectHandle{{40}},
+		objects:    map[pkcs11.ObjectHandle]map[string][]byte{40: {"id": []byte("DS")}},
+	}
+	identifier, err := certificateIdentifier(module, 1, der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(identifier, []byte("DS")) {
+		t.Fatalf("identifier = %q, want \"DS\"", identifier)
+	}
+}
