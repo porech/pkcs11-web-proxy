@@ -264,3 +264,22 @@ func parseOptions(args []string, errorOutput io.Writer) (string, options, error)
 
 	return mode, opts, nil
 }
+
+// loggingHandler prints each request before serving it.
+func loggingHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		timedLog(fmt.Sprintf("Request: %s %s", r.Method, r.URL.String()))
+		next.ServeHTTP(w, r)
+	})
+}
+
+// listenAndServe runs the HTTP listener both modes share.
+func listenAndServe(opts options, handler http.Handler) error {
+	address := fmt.Sprintf("%s:%d", opts.ListenAddress, opts.ListenPort)
+	if opts.ListenTLS {
+		timedLog(fmt.Sprintf("Listening on %s over TLS", address))
+		return http.ListenAndServeTLS(address, opts.ListenTLSCertificate, opts.ListenTLSPrivateKey, handler)
+	}
+	timedLog(fmt.Sprintf("Listening on %s", address))
+	return http.ListenAndServe(address, handler)
+}

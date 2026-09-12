@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"io"
 	"testing"
 )
@@ -69,5 +70,17 @@ func TestUnknownSubcommandIsRejected(t *testing.T) {
 func TestPinAndPinFileCannotBothBeGiven(t *testing.T) {
 	if _, _, err := parseOptions([]string{"-pin", "1234", "-pin-file", "/tmp/pin"}, io.Discard); err == nil {
 		t.Fatal("both pin and pin-file were accepted")
+	}
+}
+
+func TestSelectCertificateRefusesAnIndexOutsideTheList(t *testing.T) {
+	certificates := []tls.Certificate{{}, {}}
+	for _, index := range []int{-1, 2, 99} {
+		if _, err := selectCertificate(certificates, index); err == nil {
+			t.Fatalf("index %d was accepted for a list of 2", index)
+		}
+	}
+	if _, err := selectCertificate(certificates, 1); err != nil {
+		t.Fatalf("index 1 was refused for a list of 2: %v", err)
 	}
 }
