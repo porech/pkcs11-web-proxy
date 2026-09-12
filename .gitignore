@@ -26,3 +26,10 @@ go.work
 # Binaries
 pkcs11-web-proxy
 pkcs11-web-proxy.exe
+
+# Development documentation and planning
+docs/
+plans/
+specs/
+notes/
+design/
